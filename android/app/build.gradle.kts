@@ -21,7 +21,7 @@ android {
     namespace = "com.ledgerx"
     compileSdk = 34
     defaultConfig {
-        applicationId = "com.ledgerx"; minSdk = 26; targetSdk = 34; versionCode = 3; versionName = "0.3.0"
+        applicationId = "com.ledgerx"; minSdk = 26; targetSdk = 34; versionCode = 4; versionName = "0.3.1"
         buildConfigField("String", "AMOY_REGISTRY", stringLiteral(configValue("AMOY_REGISTRY")))
         buildConfigField("String", "AMOY_RPC_URL", stringLiteral(configValue("AMOY_RPC_URL")))
         buildConfigField("String", "SUPABASE_URL", stringLiteral(configValue("SUPABASE_URL")))

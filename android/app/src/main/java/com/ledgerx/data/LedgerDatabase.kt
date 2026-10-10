@@ -3,6 +3,7 @@ package com.ledgerx.data
 import android.content.Context
 import com.ledgerx.data.entities.*
 import com.ledgerx.data.dao.*
+import com.ledgerx.data.migration.Migration2to3
 import com.ledgerx.data.migration.Migration1to2
 import androidx.room.*
 import com.ledgerx.domain.*
@@ -30,7 +31,7 @@ interface MovementDao {
     @Insert suspend fun insert(movement: MovementEntity)
     @Upsert suspend fun merge(movements: List<MovementEntity>)
 }
-@Database(entities = [MovementEntity::class, TransactionEntity::class, MonthlySummaryEntity::class, LoanEntity::class, LoanEventEntity::class, SyncQueueEntity::class, CategoryEntity::class, FriendshipEntity::class, ProfileCacheEntity::class, DeletionEntity::class], version = 2, exportSchema = false)
+@Database(entities = [MovementEntity::class, TransactionEntity::class, MonthlySummaryEntity::class, LoanEntity::class, LoanEventEntity::class, SyncQueueEntity::class, CategoryEntity::class, FriendshipEntity::class, ProfileCacheEntity::class, DeletionEntity::class], version = 3, exportSchema = false)
 abstract class LedgerDatabase : RoomDatabase() {
     abstract fun transactionDao(): TransactionDao
     abstract fun monthlySummaryDao(): MonthlySummaryDao
@@ -50,7 +51,7 @@ abstract class LedgerDatabase : RoomDatabase() {
                 "ledgerx-$scope.db"
             }
             instances.getOrPut(name) {
-                Room.databaseBuilder(context.applicationContext, LedgerDatabase::class.java, name).addMigrations(Migration1to2).build()
+                Room.databaseBuilder(context.applicationContext, LedgerDatabase::class.java, name).addMigrations(Migration1to2, Migration2to3).build()
             }
         }
     }

@@ -15,7 +15,7 @@ data class LedgerState(
     val owner: String="", val snapshot: LedgerSnapshot=LedgerSnapshot(),
     val legacy: List<Movement> = emptyList(), val queue: List<SyncQueueEntity> = emptyList(),
     val search: List<ProfileRow> = emptyList(), val ready: Boolean=false,
-    val busy: Boolean=false, val message: String?=null
+    val busy: Boolean=false, val message: String?=null, val sync: SyncProgress=SyncProgress()
 )
 class LedgerController(private val context: Context,private val scope: CoroutineScope) {
     private val mutable=MutableStateFlow(LedgerState())
@@ -34,8 +34,8 @@ class LedgerController(private val context: Context,private val scope: Coroutine
                 launch { ConnectivityObserver(context).connected.filter { it }.collect { SyncManager.enqueue(context,owner) } }
                 SyncManager.schedule(context,owner)
                 realtime=LoanRealtimeManager().start(scope,owner) { SyncManager.enqueue(context,owner) }
-                combine(next.snapshot,next.db.syncQueueDao().observe()) { snapshot,queue -> snapshot to queue }.collect { (s,q) ->
-                    if(repo===next) mutable.update { it.copy(snapshot=s,queue=q,legacy=next.legacy(),ready=true) }
+                combine(next.snapshot,next.db.syncQueueDao().observe(),SyncHealth.states) { snapshot,queue,health -> Triple(snapshot,queue,health[owner] ?: SyncProgress()) }.collect { (s,q,health) ->
+                    if(repo===next) mutable.update { it.copy(snapshot=s,queue=q,legacy=next.legacy(),ready=true,sync=health) }
                 }
             } catch(e: CancellationException) { throw e }
             catch(_: Exception) { mutable.update { it.copy(message="Could not open this ledger. Please restart the app.") } }
@@ -45,25 +45,25 @@ class LedgerController(private val context: Context,private val scope: Coroutine
         repo?.owner?.let { SyncManager.cancel(context,it) }
         job?.cancel(); realtime?.cancel(); repo=null; mutable.value=LedgerState()
     }
-    private fun action(block: suspend (TransactionRepository)->Unit) {
+    private fun action(onSaved: () -> Unit = {}, block: suspend (TransactionRepository)->Unit) {
         val target=repo?:return
         if(mutable.value.busy) return
         mutable.update { it.copy(busy=true,message=null) }
         scope.launch {
             try {
                 block(target)
-                if(repo===target) { SyncManager.enqueue(context,target.owner); mutable.update { it.copy(message="Saved. Changes sync automatically when connected.") } }
+                if(repo===target) { SyncManager.enqueue(context,target.owner); mutable.update { it.copy(message="Saved on this device.") }; onSaved() }
             } catch(e: CancellationException) { throw e }
             catch(e: IllegalArgumentException) { if(repo===target) mutable.update { it.copy(message=e.message?:"Check the entered values.") } }
             catch(_: Exception) { if(repo===target) mutable.update { it.copy(message="Could not complete this action. Your saved records are safe.") } }
             finally { if(repo===target) mutable.update { it.copy(busy=false) } }
         }
     }
-    fun add(type:String,amount:Long,account:String,destination:String?,category:String?,description:String) = action { it.add(type,amount,account,destination,category,description) }
-    fun category(name:String,icon:String)=action { it.addCategory(name,icon) }
-    fun loan(friend:String,amount:Long,borrow:Boolean,note:String,account:String)=action { LoanRepository(it).propose(friend,amount,borrow,note,account) }
+    fun add(type:String,amount:Long,account:String,destination:String?,category:String?,description:String,onSaved:()->Unit={}) = action(onSaved) { it.add(type,amount,account,destination,category,description) }
+    fun category(name:String,icon:String,onSaved:()->Unit={})=action(onSaved) { it.addCategory(name,icon) }
+    fun loan(friend:String,amount:Long,borrow:Boolean,note:String,account:String,onSaved:()->Unit={})=action(onSaved) { LoanRepository(it).propose(friend,amount,borrow,note,account) }
     fun decideLoan(id:String,accept:Boolean,account:String)=action { LoanRepository(it).decide(id,accept,account) }
-    fun event(loan:LoanEntity,amount:Long,correction:Boolean)=action { LoanRepository(it).event(loan,amount,correction) }
+    fun event(loan:LoanEntity,amount:Long,correction:Boolean,onSaved:()->Unit={})=action(onSaved) { LoanRepository(it).event(loan,amount,correction) }
     fun decideEvent(id:String,accept:Boolean)=action { LoanRepository(it).decideEvent(id,accept) }
     fun requestFriend(id:String)=action { FriendRepository(it).request(id) }
     fun decideFriend(id:String,accept:Boolean)=action { FriendRepository(it).decide(id,accept) }
@@ -80,8 +80,23 @@ class LedgerController(private val context: Context,private val scope: Coroutine
         }
     }
     fun importOffline()=action { it.importLegacy(LedgerRepository(LedgerDatabase.create(context)).records()) }
-    fun retry()=action { r ->
-        r.db.syncQueueDao().all().forEach { r.db.syncQueueDao().put(it.copy(attempts=0,lastAttemptAt=null)) }
+    fun clearMessage() { mutable.update { it.copy(message=null) } }
+    fun retry() = sync(resetFailures = true)
+    fun sync() = sync(resetFailures = false)
+    private fun sync(resetFailures: Boolean) {
+        val target = repo ?: return
+        if (mutable.value.sync.running || mutable.value.busy) return
+        mutable.update { it.copy(busy=true, message=null) }
+        scope.launch {
+            try {
+                if (resetFailures) target.db.syncQueueDao().all().forEach {
+                    target.db.syncQueueDao().put(it.copy(attempts=0, lastAttemptAt=null, lastError=null))
+                }
+                val retry = LedgerRemote.sync(context, target.owner)
+                if (retry && repo === target) SyncManager.enqueue(context, target.owner)
+            } catch(e: CancellationException) { throw e }
+            catch(_: Exception) { if (repo === target) SyncManager.enqueue(context, target.owner) }
+            finally { if(repo === target) mutable.update { it.copy(busy=false) } }
+        }
     }
-    fun sync()=action { LedgerRemote.sync(context,it.owner) }
 }

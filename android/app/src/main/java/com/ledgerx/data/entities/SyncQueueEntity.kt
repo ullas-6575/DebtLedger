@@ -13,5 +13,6 @@ data class SyncQueueEntity(
     @SerialName("payload") val payload: String,
     @SerialName("created_at") val createdAt: Long,
     @SerialName("attempts") val attempts: Int,
-    @SerialName("last_attempt_at") val lastAttemptAt: Long?
+    @SerialName("last_attempt_at") val lastAttemptAt: Long?,
+    @ColumnInfo(defaultValue = "NULL") @SerialName("last_error") val lastError: String? = null
 )

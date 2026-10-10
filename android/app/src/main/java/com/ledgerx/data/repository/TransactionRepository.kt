@@ -89,6 +89,16 @@ class TransactionRepository(val db: LedgerDatabase, val owner: String) {
         db.categoryDao().put(c); queue("CATEGORY",c.id,"INSERT",LedgerJson.encodeToString(c))
     }
     suspend fun queue(type: String,id: String,action: String,payload: String) {
+        if (action in setOf("ACCEPT", "REJECT")) {
+            val previous = db.syncQueueDao().all().filter { it.entityType == type && it.entityId == id && it.action in setOf("ACCEPT", "REJECT") }
+            // Keep the receipt ID for the same decision: a lost response must never apply it twice.
+            val matching = previous.lastOrNull { it.action == action && it.payload == payload }
+            previous.filter { it.id != matching?.id }.forEach { db.syncQueueDao().delete(it.id) }
+            if (matching != null) {
+                db.syncQueueDao().put(matching.copy(attempts = 0, lastAttemptAt = null, lastError = null))
+                return
+            }
+        }
         val createdAt=maxOf(System.currentTimeMillis(),(db.syncQueueDao().all().maxOfOrNull { it.createdAt } ?: 0L)+1)
         db.syncQueueDao().put(SyncQueueEntity(UUID.randomUUID().toString(),type,id,action,payload,createdAt,0,null))
     }

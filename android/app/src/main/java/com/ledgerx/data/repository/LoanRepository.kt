@@ -14,6 +14,8 @@ class LoanRepository(private val repo: TransactionRepository) {
         repo.db.loanDao().put(l); repo.queue("LOAN",l.id,"PROPOSE",LedgerJson.encodeToString(l))
     }
     suspend fun decide(id: String, accept: Boolean, account: String) = repo.db.withTransaction {
+        val loan = requireNotNull(repo.db.loanDao().all().find { it.id == id }) { "Loan no longer available." }
+        require(loan.status == "UNDER_REVIEW" && loan.proposedBy != repo.owner) { "This loan is no longer awaiting your decision." }
         repo.queue("LOAN",id,if(accept) "ACCEPT" else "REJECT",buildJsonObject { put("account",account) }.toString())
     }
     suspend fun event(loan: LoanEntity, amount: Long, correction: Boolean) = repo.db.withTransaction {
@@ -23,5 +25,15 @@ class LoanRepository(private val repo: TransactionRepository) {
         val e=LoanEventEntity(UUID.randomUUID().toString(),loan.id,if(correction) "CORRECTION" else "REPAYMENT",amount,repo.owner,null,"LOCAL_PENDING",System.currentTimeMillis(),"PENDING")
         repo.db.loanEventDao().put(e); repo.queue("LOAN_EVENT",e.id,"PROPOSE",LedgerJson.encodeToString(e))
     }
-    suspend fun decideEvent(id: String,accept: Boolean) = repo.db.withTransaction { repo.queue("LOAN_EVENT",id,if(accept) "ACCEPT" else "REJECT","{}") }
+    suspend fun decideEvent(id: String, accept: Boolean) = repo.db.withTransaction {
+        val event = requireNotNull(repo.db.loanEventDao().all().find { it.id == id }) { "Proposal no longer available." }
+        val loan = requireNotNull(repo.db.loanDao().all().find { it.id == event.loanId })
+        require(event.status == "PENDING" && event.proposedBy != repo.owner) { "This proposal is no longer awaiting your decision." }
+        require(loan.status in setOf("ACTIVE", "PARTIALLY_REPAID")) { "This loan has already been settled or replaced." }
+        if (accept) {
+            if (event.type == "REPAYMENT") require((event.amountMinor ?: 0) <= loan.principalMinor - loan.repaidMinor) { "Repayment exceeds the remaining balance. Reject this proposal and request the correct amount." }
+            if (event.type == "CORRECTION") require((event.amountMinor ?: 0) >= loan.repaidMinor) { "The corrected principal cannot be below confirmed repayments." }
+        }
+        repo.queue("LOAN_EVENT", id, if (accept) "ACCEPT" else "REJECT", "{}")
+    }
 }
