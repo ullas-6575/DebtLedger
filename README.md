@@ -1,5 +1,7 @@
 # LedgerX / DebtLedger
 
+**Development update (10 October 2026):** The workspace now includes the Room v2 overhaul, automatic sync, monthly summaries with 30-day Trash, friends, and shared-loan approvals. See [implementation and deployment notes](docs/v1-implementation.md) for setup, verification, and the optional blockchain limitations. The hosted migrations still need deployment. The v0.2.0 documentation below describes the previous release.
+
 LedgerX is a native Android app for tracking personal money, spending, and loans in Bangladeshi taka (BDT). It shows the money in your accounts, what other people owe you, and what you owe them.
 
 The current version is **0.2.0**, built with Kotlin and Jetpack Compose. It supports an offline ledger plus optional email sign-in and manual Supabase synchronization. Offline use needs no login or network; cloud features require the [Supabase setup](docs/supabase-setup.md).

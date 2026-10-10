@@ -1,6 +1,9 @@
 package com.ledgerx.data
 
 import android.content.Context
+import com.ledgerx.data.entities.*
+import com.ledgerx.data.dao.*
+import com.ledgerx.data.migration.Migration1to2
 import androidx.room.*
 import com.ledgerx.domain.*
 import kotlinx.coroutines.flow.Flow
@@ -23,11 +26,21 @@ data class MovementEntity(
 interface MovementDao {
     @Query("SELECT * FROM movements ORDER BY occurredAt DESC, rowid DESC") fun observe(): Flow<List<MovementEntity>>
     @Query("SELECT * FROM movements ORDER BY occurredAt ASC, rowid ASC") suspend fun all(): List<MovementEntity>
+    @Query("DELETE FROM movements WHERE id = :id") suspend fun delete(id: String)
     @Insert suspend fun insert(movement: MovementEntity)
     @Upsert suspend fun merge(movements: List<MovementEntity>)
 }
-@Database(entities = [MovementEntity::class], version = 1, exportSchema = false)
+@Database(entities = [MovementEntity::class, TransactionEntity::class, MonthlySummaryEntity::class, LoanEntity::class, LoanEventEntity::class, SyncQueueEntity::class, CategoryEntity::class, FriendshipEntity::class, ProfileCacheEntity::class, DeletionEntity::class], version = 2, exportSchema = false)
 abstract class LedgerDatabase : RoomDatabase() {
+    abstract fun transactionDao(): TransactionDao
+    abstract fun monthlySummaryDao(): MonthlySummaryDao
+    abstract fun loanDao(): LoanDao
+    abstract fun loanEventDao(): LoanEventDao
+    abstract fun syncQueueDao(): SyncQueueDao
+    abstract fun categoryDao(): CategoryDao
+    abstract fun friendshipDao(): FriendshipDao
+    abstract fun profileCacheDao(): ProfileCacheDao
+    abstract fun deletionDao(): DeletionDao
     abstract fun movements(): MovementDao
     companion object {
         private val instances = mutableMapOf<String, LedgerDatabase>()
@@ -37,7 +50,7 @@ abstract class LedgerDatabase : RoomDatabase() {
                 "ledgerx-$scope.db"
             }
             instances.getOrPut(name) {
-                Room.databaseBuilder(context.applicationContext, LedgerDatabase::class.java, name).build()
+                Room.databaseBuilder(context.applicationContext, LedgerDatabase::class.java, name).addMigrations(Migration1to2).build()
             }
         }
     }

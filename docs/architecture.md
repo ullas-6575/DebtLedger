@@ -1,5 +1,7 @@
 # Implementation boundary
 
+The historical sections below describe the original implementation. Current development changes and remaining deployment boundaries are documented in [v1 implementation](v1-implementation.md).
+
 The first milestone follows the brief's recommended sequence: build the normal finance app before adding cloud and blockchain coordination.
 
 ## Android
@@ -33,6 +35,19 @@ The RPC returns a complete owner snapshot inside a JSON object to avoid PostgRES
 There is no WorkManager/background retry or incremental paging yet. Failed requests retain local records for a manual retry, while repeated UUIDs prevent duplicates after a lost response. Cross-device accounting conflicts are rejected and require reconciliation; a conflict-resolution editor remains future work. See [Supabase setup](supabase-setup.md) for the SQL deployment still required on the configured hosted project.
 
 Friends and shared agreements need their own tables and policies. Do not reuse private person names as authenticated identities. Pending shared proposals must not affect financial balances. Apply accepted shared records once, transactionally; record the reciprocal account effects according to each participant's selected account.
+
+## Monthly compaction and Trash retention
+
+This requirement replaces the archive behavior in the v1.0 Phase 2–5 proposal. It is implemented in the development build; see [implementation and deployment notes](v1-implementation.md) for validation and hosted setup.
+
+- After a month closes, compact its income and expense transactions into monthly category summaries. Exclude transfers, loans, and loan events.
+- Once summaries are durably saved, move the original transactions to **Trash**, using `summaryStatus = TRASHED` instead of `ARCHIVED`. Record `trashedAt` and `deleteAfter` (30 days after entry into Trash), and retain `summaryId`. Retrying compaction must not reset the retention period or count a transaction twice.
+- Keep monthly summaries permanently. Preserve per-account financial totals before deleting originals, so balances and historical reports remain correct without double-counting summaries and originals.
+- Provide a Trash view with each item's deletion date. Old-month summaries may link to details in Trash during the retention period; after deletion, show summary totals only.
+- Permanently delete original transaction details when the 30-day deadline is reached. Scheduled cleanup handles expiration; an offline device cleans up at its next available run. Never purge unsynchronized originals until their summaries and financial totals are safely synchronized.
+- Synchronize Trash status and expiration across devices. Retain sufficient deletion metadata to prevent a stale offline device from uploading deleted originals again; deletion metadata must not retain the original transaction details.
+
+The Room model and server schema include nullable Trash timestamps, `ACTIVE`/`TRASHED` states, cleanup workers, and deletion markers. Hosted background cleanup requires the Cron job described in the deployment notes.
 
 ## Blockchain stage
 

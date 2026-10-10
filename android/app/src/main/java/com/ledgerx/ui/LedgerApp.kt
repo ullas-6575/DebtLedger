@@ -20,102 +20,218 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ledgerx.domain.*
+import com.ledgerx.ui.auth.LoginScreen
+import com.ledgerx.ui.auth.ProfileSetupScreen
+import com.ledgerx.ui.theme.*
 import java.time.Instant
 import java.time.ZoneId
 import java.time.YearMonth
 import java.time.format.DateTimeFormatter
 import java.util.UUID
 
-private val Green = Color(0xFF136F55)
-private val Background = Color(0xFFF6F8FA)
-private val Ink = Color(0xFF182D35)
-private val Muted = Color(0xFF647680)
-private val Red = Color(0xFFAD3434)
 private fun monthOf(m: Movement) = YearMonth.from(Instant.ofEpochMilli(m.occurredAt).atZone(ZoneId.systemDefault()))
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * Root composable that gates the entire app behind authentication.
+ *
+ * Flow: LOADING → LOGIN → PROFILE_SETUP → MAIN
+ */
 @Composable
 fun LedgerApp(vm: LedgerViewModel) {
+    val authState by vm.auth.collectAsStateWithLifecycle()
+
+    LedgerXTheme {
+        when (authState.screen) {
+            AuthScreen.LOADING -> LoadingScreen()
+
+            AuthScreen.LOGIN -> LoginScreen(
+                busy = authState.busy,
+                message = authState.message,
+                onSignIn = vm::signIn,
+                onSignUp = vm::signUp
+            )
+
+            AuthScreen.PROFILE_SETUP -> ProfileSetupScreen(
+                email = authState.email ?: "",
+                busy = authState.busy,
+                message = authState.message,
+                onCreateProfile = vm::createProfile
+            )
+
+            AuthScreen.MAIN -> LedgerScreen(vm)
+        }
+    }
+}
+
+@Composable
+private fun LoadingScreen() {
+    Box(
+        Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            CircularProgressIndicator(color = Green)
+            Text(
+                "Loading your ledger…",
+                style = MaterialTheme.typography.bodyMedium,
+                color = Muted
+            )
+        }
+    }
+}
+
+/**
+ * Main app content — only shown after successful authentication.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MainContent(vm: LedgerViewModel) {
     val entries by vm.movements.collectAsStateWithLifecycle()
     val ready by vm.ready.collectAsStateWithLifecycle()
     val error by vm.error.collectAsStateWithLifecycle()
     val saving by vm.saving.collectAsStateWithLifecycle()
     val cloud by vm.cloud.collectAsStateWithLifecycle()
+    val authState by vm.auth.collectAsStateWithLifecycle()
     var showCloud by rememberSaveable { mutableStateOf(false) }
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var add by rememberSaveable { mutableStateOf(false) }
-    LaunchedEffect(cloud.owner) { add = false }
     val summary = remember(entries) { Ledger.summarize(entries) }
     val tabs = listOf("Overview", "Money", "Loans", "History")
     val icons = listOf(Icons.Outlined.Dashboard, Icons.Outlined.AccountBalanceWallet, Icons.Outlined.People, Icons.AutoMirrored.Outlined.ReceiptLong)
-    MaterialTheme(colorScheme = lightColorScheme(primary = Green, background = Background, surface = Color.White, onSurface = Ink, secondary = Green)) {
-        Scaffold(
-            topBar = { TopAppBar(title = { Column { Text("LedgerX", fontWeight = FontWeight.Bold); Text(if (cloud.owner == null) "Offline ledger" else "Your cloud account", style = MaterialTheme.typography.labelMedium, color = Muted) } }, actions = {
-                TextButton(onClick = { showCloud = true }, enabled = !saving && !add) { Text("Cloud") }
-            }) },
-            bottomBar = {
-                NavigationBar(containerColor = Color.White) {
-                    tabs.forEachIndexed { i, label -> NavigationBarItem(selected = i == tab, onClick = { tab = i }, icon = { Icon(icons[i], contentDescription = null) }, label = { Text(label) }) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text("LedgerX", fontWeight = FontWeight.Bold)
+                        Text(
+                            authState.email ?: "Your account",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Muted
+                        )
+                    }
+                },
+                actions = {
+                    TextButton(onClick = { showCloud = true }, enabled = !saving && !add) {
+                        Text("Sync")
+                    }
+                    IconButton(onClick = vm::signOut) {
+                        @Suppress("DEPRECATION")
+                        Icon(Icons.Outlined.ExitToApp, contentDescription = "Sign out")
+                    }
                 }
-            },
-            floatingActionButton = { if (ready && !cloud.busy) ExtendedFloatingActionButton(onClick = { vm.clearError(); add = true }, icon = { Icon(Icons.Outlined.Add, null) }, text = { Text("Add record") }, containerColor = Green, contentColor = Color.White) }
-        ) { padding ->
-            if (!ready) Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-                if (error == null) CircularProgressIndicator() else Text(error!!, color = Red, modifier = Modifier.padding(24.dp))
-            } else LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(20.dp, 12.dp, 20.dp, 100.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                item { Text(tabs[tab], style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold) }
-                when (tab) {
-                    0 -> {
-                        item { BalanceCard(summary) }
-                        item { Accounts(summary) }
-                        item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Stat("Owed to you", summary.owedToMe, Modifier.weight(1f))
-                            Stat("You owe", summary.iOwe, Modifier.weight(1f))
+            )
+        },
+        bottomBar = {
+            NavigationBar(containerColor = Color.White) {
+                tabs.forEachIndexed { i, label ->
+                    NavigationBarItem(
+                        selected = i == tab,
+                        onClick = { tab = i },
+                        icon = { Icon(icons[i], contentDescription = null) },
+                        label = { Text(label) }
+                    )
+                }
+            }
+        },
+        floatingActionButton = {
+            if (ready && !cloud.busy) ExtendedFloatingActionButton(
+                onClick = { vm.clearError(); add = true },
+                icon = { Icon(Icons.Outlined.Add, null) },
+                text = { Text("Add record") },
+                containerColor = Green,
+                contentColor = Color.White
+            )
+        }
+    ) { padding ->
+        if (!ready) Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+            if (error == null) CircularProgressIndicator(color = Green)
+            else Text(error!!, color = Red, modifier = Modifier.padding(24.dp))
+        } else LazyColumn(
+            Modifier.fillMaxSize().padding(padding),
+            contentPadding = PaddingValues(20.dp, 12.dp, 20.dp, 100.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            item { Text(tabs[tab], style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold) }
+            when (tab) {
+                0 -> {
+                    item { BalanceCard(summary) }
+                    item { Accounts(summary) }
+                    item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Stat("Owed to you", summary.owedToMe, Modifier.weight(1f))
+                        Stat("You owe", summary.iOwe, Modifier.weight(1f))
+                    } }
+                    item { Expenses(entries) }
+                    item { SectionTitle("Recent activity") }
+                    if (entries.isEmpty()) item { Empty("A fresh start", "Add your opening funds as Income, then record your spending and loans.") }
+                    items(entries.take(5), key = { it.id }) { MovementRow(it) }
+                }
+                1 -> {
+                    item { Accounts(summary) }
+                    item { Empty("Move money between accounts", "Use Transfer to move cash, bKash or bank funds. Transfers don't count as income or expenses.") }
+                    item { Expenses(entries) }
+                    item { SectionTitle("Income & spending · this month") }
+                    val monthEntries = entries.filter { monthOf(it) == YearMonth.now() }
+                    item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Stat("Income", monthEntries.filter { it.kind == Kind.INCOME }.sumOf { it.amount }, Modifier.weight(1f))
+                        Stat("Expenses", monthEntries.filter { it.kind == Kind.EXPENSE }.sumOf { it.amount }, Modifier.weight(1f))
+                    } }
+                }
+                2 -> {
+                    item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Stat("Owed to you", summary.owedToMe, Modifier.weight(1f))
+                        Stat("You owe", summary.iOwe, Modifier.weight(1f))
+                    } }
+                    item { Text("Positive balance: they owe you. Negative balance: you owe them. These are your private records.", color = Muted) }
+                    if (summary.people.isEmpty()) item { Empty("Keep track of every loan", "Choose Loan given or Loan taken and enter a person's name. Partial repayments update their balance.") }
+                    items(summary.people.entries.sortedBy { it.key.lowercase() }, key = { it.key }) { (person, balance) ->
+                        Card(Modifier.fillMaxWidth()) { Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Outlined.Person, null, tint = Green)
+                            Spacer(Modifier.width(14.dp))
+                            Column(Modifier.weight(1f)) { Text(person, fontWeight = FontWeight.SemiBold); Text(if (balance > 0) "Owes you" else if (balance < 0) "You owe" else "Settled", color = Muted, style = MaterialTheme.typography.bodySmall) }
+                            Text(Money.format(balance), fontWeight = FontWeight.Bold, color = if (balance < 0) Red else Green)
                         } }
-                        item { Expenses(entries) }
-                        item { SectionTitle("Recent activity") }
-                        if (entries.isEmpty()) item { Empty("A fresh start", "Add your opening funds as Income, then record your spending and loans.") }
-                        items(entries.take(5), key = { it.id }) { MovementRow(it) }
                     }
-                    1 -> {
-                        item { Accounts(summary) }
-                        item { Empty("Move money between accounts", "Use Transfer to move cash, bKash or bank funds. Transfers don't count as income or expenses.") }
-                        item { Expenses(entries) }
-                        item { SectionTitle("Income & spending · this month") }
-                        val monthEntries = entries.filter { monthOf(it) == YearMonth.now() }
-                        item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Stat("Income", monthEntries.filter { it.kind == Kind.INCOME }.sumOf { it.amount }, Modifier.weight(1f))
-                            Stat("Expenses", monthEntries.filter { it.kind == Kind.EXPENSE }.sumOf { it.amount }, Modifier.weight(1f))
-                        } }
-                    }
-                    2 -> {
-                        item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Stat("Owed to you", summary.owedToMe, Modifier.weight(1f))
-                            Stat("You owe", summary.iOwe, Modifier.weight(1f))
-                        } }
-                        item { Text("Positive balance: they owe you. Negative balance: you owe them. These are your private records.", color = Muted) }
-                        if (summary.people.isEmpty()) item { Empty("Keep track of every loan", "Choose Loan given or Loan taken and enter a person's name. Partial repayments update their balance.") }
-                        items(summary.people.entries.sortedBy { it.key.lowercase() }, key = { it.key }) { (person, balance) ->
-                            Card(Modifier.fillMaxWidth()) { Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Outlined.Person, null, tint = Green)
-                                Spacer(Modifier.width(14.dp))
-                                Column(Modifier.weight(1f)) { Text(person, fontWeight = FontWeight.SemiBold); Text(if (balance > 0) "Owes you" else if (balance < 0) "You owe" else "Settled", color = Muted, style = MaterialTheme.typography.bodySmall) }
-                                Text(Money.format(balance), fontWeight = FontWeight.Bold, color = if (balance < 0) Red else Green)
-                            } }
-                        }
-                    }
-                    3 -> {
-                        item { Text("All records · ${entries.size} entries", color = Muted) }
-                        if (entries.isEmpty()) item { Empty("No records yet", "Your income, spending, transfers and loan activity will appear here.") }
-                        items(entries, key = { it.id }) { MovementRow(it) }
-                    }
+                }
+                3 -> {
+                    item { Text("All records · ${entries.size} entries", color = Muted) }
+                    if (entries.isEmpty()) item { Empty("No records yet", "Your income, spending, transfers and loan activity will appear here.") }
+                    items(entries, key = { it.id }) { MovementRow(it) }
                 }
             }
         }
-        if (add) EntryDialog(summary.people.keys.toList(), saving, error, onDismiss = { if (!saving) { add = false; vm.clearError() } }, onSave = { vm.save(it) { add = false; vm.clearError() } })
-        if (showCloud) CloudDialog(cloud, vm, onDismiss = { showCloud = false })
     }
+    if (add) EntryDialog(summary.people.keys.toList(), saving, error, onDismiss = { if (!saving) { add = false; vm.clearError() } }, onSave = { vm.save(it) { add = false; vm.clearError() } })
+    if (showCloud) SyncDialog(cloud, vm, onDismiss = { showCloud = false })
 }
+
+// ── Sync dialog (auth removed — replaced by LoginScreen) ────────────
+
+@Composable
+private fun SyncDialog(state: CloudState, vm: LedgerViewModel, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = { if (!state.busy) onDismiss() },
+        title = { Text("Sync") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Records save on this device first. Tap Sync to upload them and download changes from your other devices.")
+                Button(onClick = { vm.sync() }, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) { Text("Sync") }
+                HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                Text("To copy this device's original offline ledger into your account, use Upload offline records. The original stays on this device. Repeating does not duplicate records.", style = MaterialTheme.typography.bodySmall, color = Muted)
+                OutlinedButton(onClick = { vm.sync(importOffline = true) }, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) { Text("Upload offline records") }
+                if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                state.message?.let { Text(it) }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss, enabled = !state.busy) { Text("Close") } }
+    )
+}
+
+// ── Shared UI components ────────────────────────────────────────────
 
 @Composable private fun BalanceCard(s: LedgerSummary) {
     Card(colors = CardDefaults.cardColors(containerColor = Green), modifier = Modifier.fillMaxWidth()) {
@@ -165,7 +281,7 @@ fun LedgerApp(vm: LedgerViewModel) {
 }
 @Composable private fun SectionTitle(text: String) { Text(text, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium) }
 @Composable private fun Empty(title: String, description: String) {
-    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFFEAF2EF))) {
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = GreenSurface)) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { Text(title, fontWeight = FontWeight.SemiBold); Text(description, color = Muted) }
     }
 }
