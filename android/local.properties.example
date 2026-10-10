@@ -1,0 +1,4 @@
+# Copy these values into local.properties alongside your sdk.dir.
+# Use a publishable key only. Never put a service-role key or database password here.
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_PUBLISHABLE_KEY=sb_publishable_your_key
