@@ -2,6 +2,14 @@
 
 Implemented in the Android development build on 10 October 2026. This is source/build validation, not a production deployment or a phone acceptance test.
 
+## 24 October update: private loans, lender receipts and undo
+
+- **Add record → Give loan / Borrow → Name only · no app account** creates a private loan using the person's name. Names are trimmed, repeated spaces collapsed, and existing spelling reused without case sensitivity. No friendship or counterparty account is created. **Loan repayment → Name only** records repayment received or paid against that person's net outstanding balance, using the selected account.
+- Lenders can select **Record repayment received** on a shared loan. The server confirms this receipt directly, checks borrower funds and outstanding debt, and updates both balances. Borrower-initiated repayment proposals and principal corrections still require counterparty approval. Shared receipts remain queued while offline and affect balances after sync.
+- **History → Undo transaction** reverses income, expenses, transfers and private loan records. Original records still retained in Trash can be undone with their monthly summaries adjusted. Deleted originals cannot be undone. Shared loan details let the lender undo a confirmed repayment or an active loan with no repayments. Cancelled loans and undone shared repayments remain visible as activity.
+- Undo queues on the device and takes effect after server validation. It cannot leave accounts negative or invalidate subsequent private repayments. Undo dependent records first, then use **Cloud sync → Retry sync** if the original undo was rejected. Deletion markers prevent an old device or offline import from restoring an undone private record.
+- Room stays at version 3: the existing movements, command queue and deletion tables support these features. Deploy the new SQL migration below before using the new cloud commands. No hosted deployment is performed by these source changes.
+
 ## Implemented behavior
 
 - Room schema version 2 adds transactions, monthly summaries, shared loans, loan events, categories, friendships, profile cache, a persistent command queue, and deletion markers. The 1→2 migration preserves the original movements table. Repository initialization imports original personal records and queues a single atomic migration of the old history.
@@ -10,13 +18,13 @@ Implemented in the Android development build on 10 October 2026. This is source/
 - Closed-month income/expenses are summarized by month, category **and account**. Summarizing by account preserves account balances after detail deletion. Transfers and all loan records remain individual. Month boundaries use Asia/Dhaka consistently on Android and PostgreSQL.
 - Originals enter Trash for 30 days. Summaries retain their totals permanently. Unsynchronized originals are retained until the server acknowledges their summaries. Synced originals are purged locally on the next cleanup run after expiration; the server sweep runs hourly when Cron is enabled. Android background scheduling is approximate, particularly when the device is powered off.
 - Deletion markers prevent stale devices from restoring expired originals. Cleanup removes the original Room/server movement backup and queued transaction payloads as well as the current transaction row. Command receipts contain no transaction details.
-- Shared loans and events require an accepted friendship and the other participant's approval. Proposals do not change balances. Confirmed repayments check the outstanding amount and borrower funds. Corrections create a replacement loan with the prior repayments carried forward, preserve the superseded original, and reject other pending events against it.
+- Shared loan proposals require an accepted friendship and the other participant's approval. Proposals do not change balances. Lenders can directly record repayment receipts; borrower proposals require approval. Confirmed repayments check the outstanding amount and borrower funds. Corrections create a replacement loan with the prior repayments carried forward, preserve the superseded original, and reject other pending events against it.
 
 ## Existing private loans
 
 Old records have names, not verified account IDs or mutual approvals. They remain private legacy records and retain their original account/debt effects. They are never automatically converted into confirmed shared agreements. Server `legacy_movements` and the local original movements table preserve this history; the Loans screen shows its private balances. Cloud-only legacy history is downloaded in the owner-scoped snapshot.
 
-The Profile action **Import original offline ledger into this account** explicitly copies the original unsigned ledger into the selected account. Its history is imported in chronological order, with idempotent IDs. It does not silently attach the device's private history to every account. Legacy private loans are displayed read-only; ongoing shared loan workflows use verified friend IDs.
+The Profile action **Import original offline ledger into this account** explicitly copies the original unsigned ledger into the selected account. Its history is imported in chronological order, with idempotent IDs. It does not silently attach the device's private history to every account. Existing private loans support the same name-only repayment and undo controls as newly entered private loans.
 
 ## Hosted database setup
 
@@ -25,6 +33,7 @@ Apply these files, in order, using an administrator connection or the Supabase S
 1. `supabase/migrations/001_private_ledger.sql` — only if the original schema is not already installed.
 2. `supabase/migrations/002_v1_schema.sql`.
 3. `supabase/migrations/003_shared_loans.sql`.
+4. `supabase/migrations/20261024145351_undo_private_loans.sql`.
 
 The new migrations have been tested against a disposable PostgreSQL 15 database. They have **not** been applied to the hosted project. Applying migration 003 intentionally disables the old `sync_ledger` write path; old app versions must be upgraded. Existing original data is migrated before that path is disabled.
 
@@ -50,7 +59,7 @@ Proof state is currently stored on the device and bound to the immutable accepte
 
 ## Verification
 
-Recorded final result: **23 Android tests passed** (0 failures/errors/skips), **debug APK built**, **lint: 0 errors / 14 warnings**, and **37 PostgreSQL regression checks passed**. Lint warnings concern pinned dependency/SDK versions, backup configuration compatibility, and KAPT usage.
+24 October validation: **36 Android tests passed** (0 failures/errors/skips), **debug APK built**, **lint: 0 errors / 5 warnings**, and **69 PostgreSQL regression checks passed**, including the follow-up audit with automatic Data API grants disabled. Android validation used Gradle's offline mode. Lint warnings concern SDK/backup configuration and KAPT usage.
 
 From `android/`:
 
@@ -66,7 +75,7 @@ Against a disposable local PostgreSQL instance:
 PGHOST=/path/to/local/socket PGPORT=55441 python3 supabase/tests/test_v1.py
 ```
 
-The database suite covers both participants and outsiders, self-approval rejection, idempotent retries, repayments, corrections, legacy imports, Trash expiry, summary preservation and stale-client resurrection prevention. It creates and removes its own test database.
+The database suite covers both participants and outsiders, self-approval rejection, idempotent retries, lender receipts, repayments, corrections, private names, legacy imports, Trash expiry, undo of transactions and shared loans, summary preservation and stale-client resurrection prevention. It creates and removes its own test database.
 
 Before release, verify two real accounts on devices: offline save/reconnect, process death, sign-out/account switching, Realtime approvals, duplicate retries, and the deployed Cron job. No hosted, emulator/phone, or live Amoy run was performed in this implementation session.
 

@@ -37,14 +37,28 @@ try:
     sql("""do $$ begin
       if not exists(select from pg_roles where rolname='anon') then create role anon; end if;
       if not exists(select from pg_roles where rolname='authenticated') then create role authenticated; end if;
+      if not exists(select from pg_roles where rolname='service_role') then create role service_role; end if;
     end $$;
+    -- Reproduce the October 30 Data API defaults for this database's migration owner.
+    alter default privileges in schema public revoke all on tables from anon,authenticated,service_role;
+    alter default privileges in schema public revoke all on sequences from anon,authenticated,service_role;
     create schema auth; create table auth.users(id uuid primary key);
     create function auth.uid() returns uuid language sql stable as $$ select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid $$;
     grant usage on schema auth to authenticated,anon;
     """+f"insert into auth.users values('{A}'),('{B}'),('{C}');")
-    for name in ['001_private_ledger.sql','002_v1_schema.sql','003_shared_loans.sql']:
-        sql((ROOT/'supabase/migrations'/name).read_text())
-    check(True,'all three migrations apply cleanly')
+    for migration in sorted((ROOT/'supabase/migrations').glob('*.sql')):
+        sql(migration.read_text())
+    check(True,'all migrations apply cleanly')
+    audit=(ROOT/'supabase/checks/data_api_access.sql').read_text()
+    report=sql(audit).splitlines()
+    check(len(report)==18 and all(row.endswith('|OK') for row in report),'explicit grants and RLS match all 18 table/function access checks without automatic grants')
+    sql(f"insert into public.profiles(id,username,display_name) values('{A}','ledger_test_a','Test A');",A)
+    check(sql(f"select username from public.profiles where id='{A}';",B)=='ledger_test_a','authenticated profile creation and friend discovery work without default grants')
+    check('row-level security' in sql(f"insert into public.profiles(id,username,display_name) values('{B}','forged','Forged');",A,True),'profile INSERT grant does not permit another user identity')
+    # The hosted audit must detect missing grants, not merely produce a green report.
+    sql('revoke select on public.profiles from authenticated;')
+    check('table public.profiles|MISSING: authenticated SELECT' in sql(audit),'read-only audit detects a missing required grant')
+    sql('grant select on public.profiles to authenticated;')
     income=tx(100000)
     check(len(snap()['transactions'])==1,'personal record sync')
     check(not snap(B)['transactions'],'owner isolation in snapshot')
@@ -115,6 +129,81 @@ try:
     newcat=C+':custom'
     cmd('CATEGORY',newcat,'INSERT',dict(id=newcat,user_id=C,name='Custom',icon='X',is_default=False,sort_order=9),C)
     check(any(c['id']==newcat for c in snap(C)['categories']),'category queue supports stable text IDs')
+    # Direct lender receipts and undo retain authorization, limits and retry safety.
+    direct_id=str(uuid.uuid4())
+    direct=dict(id=direct_id,loan_id=correction,type='REPAYMENT',amount_minor=5000,proposed_by=A)
+    check('lender' in cmd('LOAN_EVENT',direct_id,'RECORD',dict(direct,proposed_by=B),B,True),'borrower cannot directly confirm a receipt')
+    check('lender' in cmd('LOAN_EVENT',direct_id,'RECORD',dict(direct,proposed_by=C),C,True),'third party cannot record repayment')
+    receipt=str(uuid.uuid4())
+    cmd('LOAN_EVENT',direct_id,'RECORD',direct,receipt=receipt)
+    cmd('LOAN_EVENT',direct_id,'RECORD',direct,receipt=receipt)
+    cmd('LOAN_EVENT',direct_id,'RECORD',direct)
+    check(next(l for l in snap()['loans'] if l['id']==correction)['repaid_minor']==25000,'lender receipt applies once without borrower approval')
+    check('lender' in cmd('LOAN_EVENT',direct_id,'UNDO',{},B,True),'borrower cannot undo lender receipt')
+    cmd('LOAN_EVENT',direct_id,'UNDO',{})
+    cmd('LOAN_EVENT',direct_id,'UNDO',{})
+    check(next(l for l in snap()['loans'] if l['id']==correction)['repaid_minor']==20000,'repayment undo is idempotent')
+    check(next(e for e in snap()['events'] if e['id']==direct_id)['status']=='UNDONE','undone repayment retains audit record')
+    full_id=str(uuid.uuid4());full=dict(direct,id=full_id,amount_minor=25000)
+    cmd('LOAN_EVENT',full_id,'RECORD',full)
+    check(next(l for l in snap()['loans'] if l['id']==correction)['status']=='REPAID','lender can settle loan directly')
+    cmd('LOAN_EVENT',full_id,'UNDO',{})
+    check(next(l for l in snap()['loans'] if l['id']==correction)['fully_repaid_at'] is None,'undo full repayment reopens loan')
+    excess_id=str(uuid.uuid4())
+    check('balance' in cmd('LOAN_EVENT',excess_id,'RECORD',dict(direct,id=excess_id,amount_minor=999999),fail=True),'direct overpayment rejected')
+
+    private_id=str(uuid.uuid4())
+    private=dict(old_loan,id=private_id,person='  Name   Only  ',amount=1000,occurred_at='2026-10-24T06:00:00Z')
+    cmd('PRIVATE_MOVEMENT',private_id,'INSERT',private,C)
+    private_rows=snap(C)['legacy_movements']
+    check(next(m for m in private_rows if m['id']==private_id)['person']=='Name Only','name-only loan normalizes whitespace')
+    check(not snap(A)['legacy_movements'],'name-only friend has no shared identity')
+    repayment_id=str(uuid.uuid4());repayment=dict(private,id=repayment_id,kind='RECEIVE_REPAYMENT',amount=400,person='name only',occurred_at='2026-10-24T06:00:01Z')
+    cmd('PRIVATE_MOVEMENT',repayment_id,'INSERT',repayment,C)
+    check(next(m for m in snap(C)['legacy_movements'] if m['id']==repayment_id)['person']=='Name Only','private repayment reuses canonical name')
+    check('repayments' in cmd('PRIVATE_MOVEMENT',private_id,'UNDO',{},C,True),'undo loan blocked by dependent repayment')
+    check(bool(cmd('PRIVATE_MOVEMENT',private_id,'UNDO',{},B,True)),'other user cannot undo private loan')
+    before=int(sql(f"select private.account_balance('{C}','CASH');"))
+    cmd('PRIVATE_MOVEMENT',repayment_id,'UNDO',{},C)
+    cmd('PRIVATE_MOVEMENT',private_id,'UNDO',{},C)
+    check(int(sql(f"select private.account_balance('{C}','CASH');"))==before+600,'private loan and repayment undo restore funds')
+    cmd('PRIVATE_MOVEMENT',private_id,'INSERT',private,C)
+    cmd('LEGACY_IMPORT',str(uuid.uuid4()),'INSERT',[private,repayment],C)
+    check(not any(m['id'] in (private_id,repayment_id) for m in snap(C)['legacy_movements']),'stale private inserts and imports cannot resurrect undo')
+
+    undo_income=tx(1234,C,date=1750000000000)
+    snap(C) # Compact first; undo must adjust monthly totals too.
+    before=int(sql(f"select private.account_balance('{C}','CASH');"))
+    check(bool(cmd('TRANSACTION',undo_income['id'],'UNDO',{},A,True)),'cross-owner transaction undo rejected')
+    cmd('TRANSACTION',undo_income['id'],'UNDO',{},C)
+    cmd('TRANSACTION',undo_income['id'],'UNDO',{},C)
+    check(int(sql(f"select private.account_balance('{C}','CASH');"))==before-1234,'compacted income undo adjusts totals exactly once')
+    check(not any(t['id']==undo_income['id'] for t in snap(C)['transactions']),'undone original removed from snapshot')
+    check('balance' in cmd('TRANSACTION',income['id'],'UNDO',{},fail=True),'undo income blocked when money has been spent or lent')
+    expense=tx(200,C,kind='EXPENSE')
+    before=int(sql(f"select private.account_balance('{C}','CASH');"))
+    cmd('TRANSACTION',expense['id'],'UNDO',{},C)
+    check(int(sql(f"select private.account_balance('{C}','CASH');"))==before+200,'expense undo refunds account')
+    transfer=dict(id=str(uuid.uuid4()),user_id=C,type='TRANSFER',amount_minor=500,account='CASH',destination='BANK',category_id=None,description='',occurred_at=1791500000000)
+    cmd('TRANSACTION',transfer['id'],'INSERT',transfer,C)
+    cmd('TRANSACTION',transfer['id'],'UNDO',{},C)
+    check(sql(f"select private.account_balance('{C}','BANK');")=='0' and int(sql(f"select private.account_balance('{C}','CASH');"))==before+200,'transfer undo reverses both accounts')
+    loan_undo_id=str(uuid.uuid4())
+    cmd('LOAN',loan_undo_id,'PROPOSE',dict(loan,id=loan_undo_id,principal_minor=1000))
+    cmd('LOAN',loan_undo_id,'ACCEPT',{'account':'CASH'},B)
+    check('lender' in cmd('LOAN',loan_undo_id,'UNDO',{},B,True),'borrower cannot unilaterally undo loan')
+    before=int(sql(f"select private.account_balance('{A}','CASH');"))
+    cmd('LOAN',loan_undo_id,'UNDO',{})
+    cmd('LOAN',loan_undo_id,'UNDO',{})
+    check(int(sql(f"select private.account_balance('{A}','CASH');"))==before+1000,'unrepaid shared loan undo returns lender funds once')
+    check(next(l for l in snap()['loans'] if l['id']==loan_undo_id)['status']=='CANCELLED','shared loan undo preserves cancelled agreement')
+    check('repayments' in cmd('LOAN',correction,'UNDO',{},fail=True),'shared loan with confirmed repayments cannot be undone')
+    # Direct receipts must still check the borrower's available funds.
+    borrower_balance=int(sql(f"select private.account_balance('{B}','CASH');"))
+    tx(borrower_balance,B,kind='EXPENSE')
+    no_funds_id=str(uuid.uuid4())
+    check('borrower' in cmd('LOAN_EVENT',no_funds_id,'RECORD',dict(direct,id=no_funds_id,amount_minor=1),fail=True),'direct repayment rejects insufficient borrower funds')
+    check('permission denied' in sql("select private.ledger_command_v3(gen_random_uuid(),'CATEGORY','x','INSERT','{}');",A,True),'old command implementation is not callable by clients')
     print(f'{checks} v1 checks passed')
 finally:
     subprocess.run(['dropdb','--if-exists',DB],check=True)

@@ -24,6 +24,12 @@ fun syncIssue(error: Exception): String = when (error) {
 }
 
 fun serverSyncIssue(status: Int, error: String): String = when {
+    error.contains("Undo later repayments", true) || error.contains("Undo repayments before", true) ->
+        "Undo the repayments for this loan first, then retry this undo from Cloud sync."
+    error.contains("Undo would leave", true) ->
+        "Undo would leave insufficient funds. Undo dependent spending first, then retry from Cloud sync."
+    error.contains("Repayment cannot be undone", true) ->
+        "This repayment belongs to a loan that has changed. Refresh and review the current loan."
     error.contains("Repayment exceeds", true) || error.contains("Invalid amount", true) ->
         "This repayment exceeds the remaining loan balance. Reject this proposal and request the correct amount."
     error.contains("Correction below", true) -> "The corrected principal cannot be below repayments already confirmed."

@@ -103,7 +103,7 @@ fun LedgerScreen(vm: LedgerViewModel) {
             0 -> Overview(state, Modifier.padding(padding), { open("sync") }, { tab = 2 }, { tab = 3 })
             1 -> MoneyPanel(state, Modifier.padding(padding)) { open("categories") }
             2 -> LoansPanel(state, Modifier.padding(padding), { open("friends") }) { loanId = it; open("loan") }
-            else -> HistoryPanel(state, Modifier.padding(padding))
+            else -> HistoryPanel(state, vm.ledger, Modifier.padding(padding))
         }
     }
     if (sheet != null) ModalBottomSheet(onDismissRequest = { sheet = null }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true), containerColor = Background) {
@@ -255,7 +255,7 @@ private fun LoansPanel(state: LedgerState, modifier: Modifier, friends: () -> Un
             FilterChip(!closed, { closed = false }, { Text("Open") })
             FilterChip(closed, { closed = true }, { Text("Completed") })
         } }
-        if (loans.isEmpty()) item { EmptyState(if (closed) "No completed loans" else "No open loans", "Add a friend, then choose Give loan or Borrow in Add record. Both people approve changes.", Icons.Outlined.People) }
+        if (loans.isEmpty()) item { EmptyState(if (closed) "No completed shared loans" else "No open shared loans", "Choose Give loan or Borrow in Add record. Use Name only for someone without an account, or choose an app friend for a shared loan.", Icons.Outlined.People) }
         items(loans, key = { it.id }) { loan ->
             Card(onClick = { open(loan.id) }, colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
                 Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -274,16 +274,17 @@ private fun LoansPanel(state: LedgerState, modifier: Modifier, friends: () -> Un
             }
         }
         if (state.legacy.isNotEmpty()) {
-            item { SectionTitle("Older private loans") }
-            item { Text("Preserved name-based records. These do not use shared approvals.", color = Muted, style = MaterialTheme.typography.bodySmall) }
-            items(Ledger.summarize(state.legacy).people.entries.toList(), key = { "legacy:${it.key}" }) { (name, balance) -> WhiteCard {
-                Row { Text(name, Modifier.weight(1f)); Text(Money.format(balance), fontWeight = FontWeight.SemiBold) }
+            item { SectionTitle("Private loans · name only") }
+            item { Text("Use Add record → Loan repayment → Name only to record money returned.", color = Muted, style = MaterialTheme.typography.bodySmall) }
+            items(Ledger.summarize(state.legacy).people.entries.filter { (it.value == 0L) == closed }, key = { "legacy:${it.key}" }) { (name, balance) -> WhiteCard {
+                Row { Text(name, Modifier.weight(1f)); Text(Money.format(kotlin.math.abs(balance)), fontWeight = FontWeight.SemiBold) }
+                Text(if (balance > 0) "Owes you" else if (balance < 0) "You owe" else "Settled", color = Muted)
             } }
         }
     }
 }
 @Composable
-private fun HistoryPanel(state: LedgerState, modifier: Modifier) {
+private fun HistoryPanel(state: LedgerState, controller: LedgerController, modifier: Modifier) {
     var trash by rememberSaveable { mutableStateOf(false) }
     val s = state.snapshot
     val rows = s.transactions.filter { (it.summaryStatus == "TRASHED") == trash }.sortedByDescending { it.occurredAt }
@@ -299,8 +300,33 @@ private fun HistoryPanel(state: LedgerState, modifier: Modifier) {
             items(summaries, key = { "summary:${it.first().id}" }) { group -> SummaryTile(group, state) }
         }
         if (rows.isEmpty() && (trash || s.summaries.isEmpty())) item { EmptyState(if (trash) "Trash is empty" else "No records yet", if (trash) "Closed-month originals appear here after monthly summaries are created." else "Your income, expenses and transfers will appear here.") }
-        items(rows, key = { it.id }) { TransactionTile(it, s.categories) }
+        items(rows, key = { it.id }) {
+            Column { TransactionTile(it, s.categories); UndoRecordButton(state, controller, "TRANSACTION", it.id) }
+        }
+        if (!trash && state.legacy.isNotEmpty()) {
+            item { SectionTitle("Private loan records") }
+            items(state.legacy.sortedByDescending { it.occurredAt }, key = { "private:${it.id}" }) { movement -> WhiteCard {
+                Text("${movement.kind.label} · ${movement.person}", fontWeight = FontWeight.SemiBold)
+                Text("${Money.format(movement.amount)} · ${movement.account.label} · ${displayDate(movement.occurredAt)}", color = Muted)
+                if (movement.note.isNotBlank()) Text(movement.note)
+                UndoRecordButton(state, controller, "PRIVATE_MOVEMENT", movement.id)
+            } }
+        }
     }
+}
+
+@Composable
+internal fun UndoRecordButton(state: LedgerState, controller: LedgerController, type: String, id: String) {
+    var confirm by rememberSaveable(id) { mutableStateOf(false) }
+    val pending = state.queue.find { it.entityType == type && it.entityId == id && it.action == "UNDO" }
+    TextButton(onClick = { confirm = true }, enabled = !state.busy && pending == null) {
+        Text(if (pending != null) "Undo waiting to sync" else "Undo transaction")
+    }
+    pending?.lastError?.let { Text(it, color = Red, style = MaterialTheme.typography.bodySmall) }
+    if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("Undo this transaction?") },
+        text = { Text("Reverse this record's effect on balances after sync. Undo is blocked if it would leave insufficient funds or invalidate later repayments.") },
+        confirmButton = { TextButton(onClick = { confirm = false; controller.undo(type, id) }) { Text("Undo transaction") } },
+        dismissButton = { TextButton(onClick = { confirm = false }) { Text("Keep record") } })
 }
 @Composable
 private fun SummaryTile(group: List<MonthlySummaryEntity>, state: LedgerState) {

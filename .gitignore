@@ -1,5 +1,7 @@
 *.iml
 .gradle/
+.kotlin/
+supabase/.temp/
 **/build/
 local.properties
 .env

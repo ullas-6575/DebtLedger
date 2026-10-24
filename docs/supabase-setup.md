@@ -1,5 +1,7 @@
 # Supabase setup
 
+**October 30, 2026 Data API notice:** LedgerX already grants the app access explicitly in its migrations. See the [permissions guide and read-only hosted audit](data-api-permissions.md) before changing grants in response to Supabase's notice. For the current app's full schema, follow the [v1 deployment instructions](v1-implementation.md#hosted-database-setup); the original setup below describes version 0.2.0.
+
 LedgerX 0.2.0 connects to Supabase through the Kotlin SDK's Auth and PostgREST modules. It uses the private `movements` table, not the `todos` table from the Supabase quickstart.
 
 ## Current project status

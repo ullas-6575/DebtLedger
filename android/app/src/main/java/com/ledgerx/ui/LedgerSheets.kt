@@ -59,6 +59,8 @@ internal fun AddPanel(state: LedgerState, controller: LedgerController, dismiss:
     var destination by rememberSaveable { mutableStateOf("BKASH") }
     var category by rememberSaveable { mutableStateOf(state.snapshot.categories.firstOrNull()?.id.orEmpty()) }
     var friend by rememberSaveable { mutableStateOf("") }
+    var privateLoan by rememberSaveable { mutableStateOf(false) }
+    var person by rememberSaveable { mutableStateOf("") }
     var repaymentLoan by rememberSaveable { mutableStateOf("") }
     var note by rememberSaveable { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
@@ -66,15 +68,23 @@ internal fun AddPanel(state: LedgerState, controller: LedgerController, dismiss:
     SheetContent("Add record", "Keep your daily money in order.") {
         Choice("Record type", type, listOf("EXPENSE" to "Expense", "INCOME" to "Income", "TRANSFER" to "Transfer", "LEND" to "Give loan", "BORROW" to "Borrow / request loan", "REPAYMENT" to "Loan repayment")) { type = it; error = null; controller.clearMessage() }
         AmountInput(amount, { amount = it })
-        if (type == "REPAYMENT") {
+        if (type in setOf("LEND", "BORROW", "REPAYMENT")) {
+            Choice("Loan tracking", if (privateLoan) "PRIVATE" else "SHARED", listOf("PRIVATE" to "Name only · no app account", "SHARED" to "Shared with an app friend")) { privateLoan = it == "PRIVATE" }
+        }
+        if (type == "REPAYMENT" && !privateLoan) {
             Choice("Loan", repaymentLoan, state.snapshot.loans.filter { it.status in setOf("ACTIVE", "PARTIALLY_REPAID") }.map {
                 it.id to "${personName(state, otherPerson(it, state.owner))} · ${Money.format(it.principalMinor - it.repaidMinor)}"
             }) { repaymentLoan = it }
-            Text("Repayments use the original loan accounts and require the other person's approval.", color = Muted, style = MaterialTheme.typography.bodySmall)
+            Text("Uses the original loan accounts. Lenders record money received directly; borrower proposals need lender approval. Balances update after sync.", color = Muted, style = MaterialTheme.typography.bodySmall)
         } else Choice(if (type == "TRANSFER") "From account" else "Account", account, accounts) { account = it }
         if (type == "TRANSFER") Choice("To account", destination, accounts.filter { it.first != account }) { destination = it }
         if (type in setOf("INCOME", "EXPENSE")) Choice("Category", category, state.snapshot.categories.sortedBy { it.sortOrder }.map { it.id to "${it.icon} ${it.name}" }) { category = it }
-        if (type in setOf("LEND", "BORROW")) {
+        if (privateLoan && type in setOf("LEND", "BORROW", "REPAYMENT")) {
+            if (type == "REPAYMENT") {
+                Choice("Person", person, com.ledgerx.domain.Ledger.summarize(state.legacy).people.filterValues { it != 0L }.map { (name, balance) -> name to "$name · ${if (balance > 0) "Receive" else "Pay"} ${Money.format(kotlin.math.abs(balance))}" }) { person = it }
+            } else OutlinedTextField(person, { person = it }, label = { Text("Person's name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            Text("Private to you. No account or approval needed for this person.", color = Muted, style = MaterialTheme.typography.bodySmall)
+        } else if (type in setOf("LEND", "BORROW")) {
             val friends = state.snapshot.friendships.filter { it.status == "ACCEPTED" }.map { if (it.userId == state.owner) it.friendId else it.userId }
             Choice("Friend", friend, friends.map { it to personName(state, it) }) { friend = it }
             Text(if (friends.isEmpty()) "Add a friend from Loans → Friends first." else "The other person approves before balances change.", color = Muted, style = MaterialTheme.typography.bodySmall)
@@ -89,10 +99,19 @@ internal fun AddPanel(state: LedgerState, controller: LedgerController, dismiss:
                     val minor = Money.parse(amount)
                     require(note.length <= 300) { "Keep the note within 300 characters." }
                     when (type) {
-                        "LEND", "BORROW" -> { require(friend.isNotEmpty()) { "Choose an accepted friend." }; controller.loan(friend, minor, type == "BORROW", note, account, dismiss) }
+                        "LEND", "BORROW" -> {
+                            if (privateLoan) controller.privateRecord(type, minor, account, person, note, dismiss)
+                            else { require(friend.isNotEmpty()) { "Choose an accepted friend." }; controller.loan(friend, minor, type == "BORROW", note, account, dismiss) }
+                        }
                         "REPAYMENT" -> {
-                            val loan = state.snapshot.loans.find { it.id == repaymentLoan } ?: throw IllegalArgumentException("Choose an active loan.")
-                            controller.event(loan, minor, false, dismiss)
+                            if (privateLoan) {
+                                val balance = com.ledgerx.domain.Ledger.summarize(state.legacy).people[person] ?: 0L
+                                require(balance != 0L) { "Choose a person with an outstanding loan." }
+                                controller.privateRecord(if (balance > 0) "RECEIVE_REPAYMENT" else "PAY_REPAYMENT", minor, account, person, "", dismiss)
+                            } else {
+                                val loan = state.snapshot.loans.find { it.id == repaymentLoan } ?: throw IllegalArgumentException("Choose an active loan.")
+                                controller.event(loan, minor, false, dismiss)
+                            }
                         }
                         else -> {
                             require(type != "TRANSFER" || account != destination) { "Choose two different accounts." }
@@ -100,7 +119,7 @@ internal fun AddPanel(state: LedgerState, controller: LedgerController, dismiss:
                         }
                     }
                 } catch (e: IllegalArgumentException) { error = e.message ?: "Check the entered values." }
-            }) { Text(if (state.busy) "Saving…" else if (type in setOf("LEND", "BORROW", "REPAYMENT")) "Propose" else "Save record") }
+            }) { Text(if (state.busy) "Saving…" else if (!privateLoan && (type in setOf("LEND", "BORROW") || (type == "REPAYMENT" && state.snapshot.loans.find { it.id == repaymentLoan }?.lenderId != state.owner))) "Propose" else "Save record") }
         }
     }
 }
@@ -200,6 +219,7 @@ internal fun LoanDetail(state: LedgerState, loan: LoanEntity, controller: Ledger
     var proof by rememberSaveable(loan.id) { mutableStateOf(false) }
     val active = loan.status in setOf("ACTIVE", "PARTIALLY_REPAID")
     val remaining = loan.principalMinor - loan.repaidMinor
+    val lender = loan.lenderId == state.owner
     SheetContent(personName(state, otherPerson(loan, state.owner)), if (loan.lenderId == state.owner) "You lent · ${statusLabel(loan.status)}" else "You borrowed · ${statusLabel(loan.status)}") {
         WhiteCard {
             Text("OUTSTANDING", color = Muted, style = MaterialTheme.typography.labelMedium)
@@ -218,11 +238,11 @@ internal fun LoanDetail(state: LedgerState, loan: LoanEntity, controller: Ledger
         }
         if (active) {
             if (edit == null) {
-                Button(onClick = { edit = "REPAYMENT"; amount = ""; error = null }, modifier = Modifier.fillMaxWidth(), enabled = !state.busy) { Text("Propose repayment") }
+                Button(onClick = { edit = "REPAYMENT"; amount = ""; error = null }, modifier = Modifier.fillMaxWidth(), enabled = !state.busy) { Text(if (lender) "Record repayment received" else "Propose repayment") }
                 TextButton(onClick = { edit = "CORRECTION"; amount = ""; error = null }, modifier = Modifier.fillMaxWidth(), enabled = !state.busy) { Text("Correct principal") }
             } else WhiteCard {
-                Text(if (edit == "CORRECTION") "Correct principal" else "Propose repayment", fontWeight = FontWeight.Bold)
-                Text(if (edit == "CORRECTION") "Enter the corrected total, not the difference. Both people must approve." else "Available to repay: ${Money.format(remaining)}. The other person must approve.", color = Muted, style = MaterialTheme.typography.bodySmall)
+                Text(if (edit == "CORRECTION") "Correct principal" else if (lender) "Record repayment received" else "Propose repayment", fontWeight = FontWeight.Bold)
+                Text(if (edit == "CORRECTION") "Enter the corrected total, not the difference. Both people must approve." else "Available to repay: ${Money.format(remaining)}. " + if (lender) "Confirms receipt without borrower approval. Balances update after sync." else "The lender must approve.", color = Muted, style = MaterialTheme.typography.bodySmall)
                 AmountInput(amount, { amount = it }, if (edit == "CORRECTION") "New principal" else "Repayment amount")
                 error?.let { Text(it, color = Red) }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -230,16 +250,18 @@ internal fun LoanDetail(state: LedgerState, loan: LoanEntity, controller: Ledger
                     Button(onClick = {
                         try { error = null; controller.event(loan, Money.parse(amount), edit == "CORRECTION") { edit = null; amount = "" } }
                         catch (e: IllegalArgumentException) { error = e.message }
-                    }, enabled = !state.busy, modifier = Modifier.weight(1f)) { Text("Propose") }
+                    }, enabled = !state.busy, modifier = Modifier.weight(1f)) { Text(if (lender && edit == "REPAYMENT") "Record received" else "Propose") }
                 }
             }
         }
+        if (active && lender && loan.repaidMinor == 0L) UndoRecordButton(state, controller, "LOAN", loan.id)
         val events = state.snapshot.events.filter { it.loanId == loan.id }.sortedByDescending { it.createdAt }
         if (events.isNotEmpty()) SectionTitle("Proposals & activity")
         events.forEach { event -> WhiteCard {
             val decision = state.queue.find { it.entityId == event.id && it.action in setOf("ACCEPT", "REJECT") }
             Text("${statusLabel(event.type)}${event.amountMinor?.let { " · ${Money.format(it)}" }.orEmpty()}", fontWeight = FontWeight.SemiBold)
             Text("${displayDate(event.createdAt)} · ${if (decision != null) "Decision waiting to sync" else statusLabel(event.status)}", style = MaterialTheme.typography.bodySmall, color = Muted)
+            if (lender && event.type == "REPAYMENT" && event.status == "CONFIRMED" && loan.status != "SUPERSEDED") UndoRecordButton(state, controller, "LOAN_EVENT", event.id)
             if (event.status == "PENDING" && event.proposedBy != state.owner && active) {
                 val valid = when (event.type) { "REPAYMENT" -> (event.amountMinor ?: 0) in 1..remaining; "CORRECTION" -> (event.amountMinor ?: 0) >= loan.repaidMinor; else -> true }
                 if (!valid) Text(if (event.type == "REPAYMENT") "This exceeds the remaining balance. Reject it and request the correct amount." else "This principal is below confirmed repayments. Reject it and request a correction.", color = Red)

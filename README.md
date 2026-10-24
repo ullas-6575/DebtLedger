@@ -1,5 +1,7 @@
 # LedgerX / DebtLedger
 
+**24 October 2026 update:** Added name-only private loans, direct repayment recording by lenders, and transaction undo after sync validation. See [usage and migration instructions](docs/v1-implementation.md#24-october-update-private-loans-lender-receipts-and-undo). The new SQL migration must be applied to the hosted database before these cloud commands can sync.
+
 **Development update (10 October 2026):** The workspace now includes the Room v2 overhaul, automatic sync, monthly summaries with 30-day Trash, friends, and shared-loan approvals. See [implementation and deployment notes](docs/v1-implementation.md) for setup, verification, and the optional blockchain limitations. The hosted migrations still need deployment. The v0.2.0 documentation below describes the previous release.
 
 LedgerX is a native Android app for tracking personal money, spending, and loans in Bangladeshi taka (BDT). It shows the money in your accounts, what other people owe you, and what you owe them.

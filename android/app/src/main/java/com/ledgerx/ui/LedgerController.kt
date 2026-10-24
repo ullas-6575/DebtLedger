@@ -61,6 +61,8 @@ class LedgerController(private val context: Context,private val scope: Coroutine
     }
     fun add(type:String,amount:Long,account:String,destination:String?,category:String?,description:String,onSaved:()->Unit={}) = action(onSaved) { it.add(type,amount,account,destination,category,description) }
     fun category(name:String,icon:String,onSaved:()->Unit={})=action(onSaved) { it.addCategory(name,icon) }
+    fun privateRecord(type:String,amount:Long,account:String,person:String,note:String,onSaved:()->Unit={})=action(onSaved) { it.addPrivate(type,amount,account,person,note) }
+    fun undo(type:String,id:String)=action { it.undo(type,id) }
     fun loan(friend:String,amount:Long,borrow:Boolean,note:String,account:String,onSaved:()->Unit={})=action(onSaved) { LoanRepository(it).propose(friend,amount,borrow,note,account) }
     fun decideLoan(id:String,accept:Boolean,account:String)=action { LoanRepository(it).decide(id,accept,account) }
     fun event(loan:LoanEntity,amount:Long,correction:Boolean,onSaved:()->Unit={})=action(onSaved) { LoanRepository(it).event(loan,amount,correction) }

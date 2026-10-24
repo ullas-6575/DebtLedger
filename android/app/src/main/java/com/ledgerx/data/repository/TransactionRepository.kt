@@ -59,11 +59,13 @@ class TransactionRepository(val db: LedgerDatabase, val owner: String) {
     }
 
     suspend fun importLegacy(records: List<Movement>) = db.withTransaction {
-        val existing=db.movements().all().map { it.id }.toSet()
+        val deleted=db.deletionDao().all().map { it.id }.toSet()
+        val existing=db.movements().all().map { it.id }.toSet() + deleted
         db.movements().merge(records.filter { it.id !in existing }.map(MovementEntity::from))
         // Initialize converts personal records without changing the original history.
         initialize()
-        if(records.isNotEmpty()) queue("LEGACY_IMPORT",UUID.randomUUID().toString(),"INSERT",LedgerJson.encodeToString(records.map(CloudMovement::from)))
+        val retained=records.filter { it.id !in deleted }
+        if(retained.isNotEmpty()) queue("LEGACY_IMPORT",UUID.randomUUID().toString(),"INSERT",LedgerJson.encodeToString(retained.map(CloudMovement::from)))
     }
 
     suspend fun current() = LedgerSnapshot(db.transactionDao().all(),db.monthlySummaryDao().all(),db.loanDao().all(),db.loanEventDao().all(),db.categoryDao().all(),db.friendshipDao().all(),db.profileCacheDao().all(),db.deletionDao().all())
@@ -82,6 +84,34 @@ class TransactionRepository(val db: LedgerDatabase, val owner: String) {
         queue("TRANSACTION",row.id,"INSERT",LedgerJson.encodeToString(row))
     }
     suspend fun legacy(): List<Movement> = db.movements().all().filter { it.kind !in setOf("INCOME","EXPENSE","TRANSFER") }.map { it.model() }
+
+    suspend fun addPrivate(type: String, amount: Long, account: String, person: String, note: String) = db.withTransaction {
+        val kind = Kind.valueOf(type)
+        require(kind in setOf(Kind.LEND, Kind.BORROW, Kind.RECEIVE_REPAYMENT, Kind.PAY_REPAYMENT))
+        val existing = legacy()
+        val name = person.trim().replace(Regex("\\s+"), " ")
+        val canonical = existing.mapNotNull { it.person }.firstOrNull { it.equals(name, true) } ?: name
+        val row = Movement(UUID.randomUUID().toString(), kind, amount, Account.valueOf(account), person = canonical, note = note.trim())
+        // Validate debt against private records, but funds against the entire ledger.
+        val funds = balances(current(), existing, owner)
+        Ledger.validate(row, existing, Account.entries.associateWith { funds.getValue(it.name) })
+        db.movements().insert(MovementEntity.from(row))
+        queue("PRIVATE_MOVEMENT", row.id, "INSERT", LedgerJson.encodeToString(CloudMovement.from(row)))
+    }
+
+    suspend fun undo(type: String, id: String) = db.withTransaction {
+        require(type in setOf("TRANSACTION", "PRIVATE_MOVEMENT", "LOAN_EVENT", "LOAN"))
+        require(when (type) {
+            "TRANSACTION" -> db.transactionDao().all().any { it.id == id && it.userId == owner }
+            "PRIVATE_MOVEMENT" -> legacy().any { it.id == id }
+            "LOAN" -> db.loanDao().all().any { it.id == id && it.lenderId == owner && it.status in setOf("ACTIVE", "PARTIALLY_REPAID") && it.repaidMinor == 0L }
+            else -> db.loanEventDao().all().any { e -> e.id == id && e.type == "REPAYMENT" && e.status == "CONFIRMED" && db.loanDao().all().any { it.id == e.loanId && it.lenderId == owner } }
+        }) { "This record cannot be undone." }
+        // Server checks dependencies atomically against both participants' latest balances.
+        if (db.syncQueueDao().all().none { it.entityType == type && it.entityId == id && it.action == "UNDO" }) {
+            queue(type, id, "UNDO", "{}")
+        }
+    }
 
     suspend fun addCategory(name: String, icon: String) = db.withTransaction {
         require(name.trim().length in 1..40 && icon.length in 1..16)
@@ -123,7 +153,7 @@ class TransactionRepository(val db: LedgerDatabase, val owner: String) {
         val deleted=db.deletionDao().all().map { it.id }.toSet()
         deleted.forEach { id -> db.transactionDao().delete(id); db.movements().delete(id) }
         db.syncQueueDao().all().forEach { q ->
-            if(q.entityType=="TRANSACTION" && q.entityId in deleted) db.syncQueueDao().delete(q.id)
+            if(q.entityType in setOf("TRANSACTION", "PRIVATE_MOVEMENT") && q.entityId in deleted) db.syncQueueDao().delete(q.id)
             if(q.entityType=="LEGACY_IMPORT") {
                 val original=LedgerJson.decodeFromString<List<CloudMovement>>(q.payload)
                 val retained=original.filter { it.id !in deleted }

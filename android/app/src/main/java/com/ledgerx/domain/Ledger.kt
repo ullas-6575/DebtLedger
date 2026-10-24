@@ -66,7 +66,7 @@ object Ledger {
         }
         return LedgerSummary(accounts, people, expenses)
     }
-    fun validate(m: Movement, existing: List<Movement>) {
+    fun validate(m: Movement, existing: List<Movement>, accountBalances: Map<Account, Long>? = null) {
         require(m.amount in 1..100_000_000_000L) { "Enter a valid positive amount." }
         require(m.note.length <= 300) { "Note must be at most 300 characters." }
         if (m.kind == Kind.TRANSFER) require(m.destination != null && m.destination != m.account) { "Choose a different destination account." }
@@ -77,11 +77,14 @@ object Ledger {
         if (loan) require(!m.person.isNullOrBlank() && m.person.length <= 80) { "Enter a person's name (up to 80 characters)." }
         else require(m.person == null) { "Only loans and repayments can name a person." }
         val s = summarize(existing)
+        val funds = accountBalances ?: s.accounts
         if (m.kind !in setOf(Kind.INCOME, Kind.BORROW, Kind.RECEIVE_REPAYMENT))
-            require(s.accounts.getValue(m.account) >= m.amount) { "Insufficient ${m.account.label} balance. Add income first." }
+            require(funds.getValue(m.account) >= m.amount) { "Insufficient ${m.account.label} balance. Add income first." }
         val balance = s.people[m.person] ?: 0L
         if (m.kind == Kind.RECEIVE_REPAYMENT) require(balance > 0 && m.amount <= balance) { "Repayment cannot exceed what this person owes you." }
         if (m.kind == Kind.PAY_REPAYMENT) require(balance < 0 && m.amount <= -balance) { "Repayment cannot exceed what you owe this person." }
+        Math.addExact(funds.getValue(m.account), if (m.kind in setOf(Kind.INCOME, Kind.BORROW, Kind.RECEIVE_REPAYMENT)) m.amount else -m.amount)
+        if (m.kind == Kind.TRANSFER) Math.addExact(funds.getValue(requireNotNull(m.destination)), m.amount)
         summarize(existing + m) // Detect aggregate overflow before saving.
     }
 }
