@@ -29,6 +29,69 @@ class TransactionRepositoryTest {
         repo=TransactionRepository(db,owner)
     }
     @After fun close() { db.close() }
+    @Test fun privateLoansUseAllFundsAndNormalizeNames()=runBlocking {
+        repo.initialize()
+        repo.add("INCOME",10000,"CASH",null,categoryKey(owner,"other"),"")
+        repo.addPrivate("LEND",6000,"CASH","  Rahim   Ali ","Lunch")
+        repo.addPrivate("RECEIVE_REPAYMENT",2000,"BANK","rahim ali","")
+        assertEquals(setOf("Rahim Ali"),repo.legacy().map { it.person }.toSet())
+        assertEquals(4000L,com.ledgerx.domain.Ledger.summarize(repo.legacy()).people["Rahim Ali"])
+        assertEquals(4000L,balances(repo.current(),repo.legacy(),owner)["CASH"])
+        assertEquals(2000L,balances(repo.current(),repo.legacy(),owner)["BANK"])
+        assertTrue(db.loanDao().all().isEmpty())
+        assertEquals(2,db.syncQueueDao().all().count { it.entityType=="PRIVATE_MOVEMENT" })
+        try { repo.addPrivate("RECEIVE_REPAYMENT",4001,"CASH","Rahim Ali",""); fail("Overpayment must fail") } catch(_:IllegalArgumentException) { }
+        try { repo.addPrivate("LEND",4001,"CASH","Someone",""); fail("Insufficient funds must fail") } catch(_:IllegalArgumentException) { }
+        try { repo.addPrivate("BORROW",100,"CASH","  ",""); fail("Name required") } catch(_:IllegalArgumentException) { }
+        assertEquals(2,repo.legacy().size)
+    }
+    @Test fun privateBorrowingCanBeRepaidFromAnotherAccount()=runBlocking {
+        repo.initialize()
+        repo.add("INCOME",500,"BANK",null,categoryKey(owner,"other"),"")
+        repo.addPrivate("BORROW",1000,"CASH","Friend","")
+        repo.addPrivate("PAY_REPAYMENT",500,"BANK","Friend","")
+        assertEquals(-500L,com.ledgerx.domain.Ledger.summarize(repo.legacy()).people["Friend"])
+        assertEquals(0L,balances(repo.current(),repo.legacy(),owner)["BANK"])
+    }
+    @Test fun undoQueuesOnceAndWaitsForAuthoritativeSnapshot()=runBlocking {
+        repo.initialize()
+        repo.add("INCOME",1000,"CASH",null,categoryKey(owner,"other"),"")
+        val t=db.transactionDao().all().single()
+        repo.undo("TRANSACTION",t.id);repo.undo("TRANSACTION",t.id)
+        assertEquals(1,db.syncQueueDao().all().count { it.action=="UNDO" })
+        assertEquals(1000L,balances(repo.current())["CASH"])
+        repo.merge(LedgerSnapshot(deletions=listOf(DeletionEntity(t.id,owner,System.currentTimeMillis()))))
+        assertTrue(db.transactionDao().all().isEmpty())
+        assertFalse(db.syncQueueDao().all().any { it.entityId==t.id })
+    }
+    @Test fun privateUndoTombstoneSurvivesStaleBackup()=runBlocking {
+        repo.initialize();repo.addPrivate("BORROW",1000,"CASH","Friend","")
+        val movement=repo.legacy().single()
+        repo.undo("PRIVATE_MOVEMENT",movement.id)
+        val remote=LedgerSnapshot(deletions=listOf(DeletionEntity(movement.id,owner,System.currentTimeMillis())))
+        repo.merge(remote)
+        repo.importLegacy(listOf(movement))
+        assertTrue(repo.legacy().isEmpty())
+        repo.merge(remote)
+        assertTrue(repo.legacy().isEmpty())
+        assertFalse(db.syncQueueDao().all().any { it.entityId==movement.id })
+    }
+    @Test fun lenderRepaymentIsDirectAndUsesFreshRemainingBalance()=runBlocking {
+        val loan=LoanEntity("loan",owner,"other",1000,"BDT","","ACTIVE",owner,"CASH","CASH",0,1,1,null,null,null,"NOT_REQUIRED","SYNCED",1,null)
+        db.loanDao().put(loan.copy(repaidMinor=400,status="PARTIALLY_REPAID"))
+        val loans=LoanRepository(repo)
+        try { loans.event(loan,601,false); fail("Stale loan cannot overpay") } catch(_:IllegalArgumentException) { }
+        loans.event(loan,500,false)
+        assertEquals("RECORD",db.syncQueueDao().all().single().action)
+        try { loans.event(loan,101,false); fail("Pending receipts reserve remaining amount") } catch(_:IllegalArgumentException) { }
+        assertEquals(400L,db.loanDao().all().single().repaidMinor)
+    }
+    @Test fun borrowerRepaymentStillRequiresApproval()=runBlocking {
+        val loan=LoanEntity("loan","other",owner,1000,"BDT","","ACTIVE",owner,"CASH","CASH",0,1,1,null,null,null,"NOT_REQUIRED","SYNCED",1,null)
+        db.loanDao().put(loan)
+        LoanRepository(repo).event(loan,500,false)
+        assertEquals("PROPOSE",db.syncQueueDao().all().single().action)
+    }
     private fun oldRow()=TransactionEntity(UUID.randomUUID().toString(),owner,"INCOME",12345,"BANK",null,categoryKey(owner,"other"),"private detail",1600000000000,"PENDING","ACTIVE",null,null,null,1,1600000000000,1600000000000)
     @Test fun compactionIsIdempotentAndUnsyncedDetailsSurvive()=runBlocking {
         repo.initialize()

@@ -19,11 +19,15 @@ class LoanRepository(private val repo: TransactionRepository) {
         repo.queue("LOAN",id,if(accept) "ACCEPT" else "REJECT",buildJsonObject { put("account",account) }.toString())
     }
     suspend fun event(loan: LoanEntity, amount: Long, correction: Boolean) = repo.db.withTransaction {
-        require(loan.status in setOf("ACTIVE","PARTIALLY_REPAID")) { "This loan is not active." }
+        val current = requireNotNull(repo.db.loanDao().all().find { it.id == loan.id }) { "Loan no longer available." }
+        require(current.status in setOf("ACTIVE","PARTIALLY_REPAID")) { "This loan is not active." }
+        require(repo.owner in setOf(current.lenderId, current.borrowerId))
         require(amount in 1..100_000_000_000L)
-        require(if(correction) amount>=loan.repaidMinor else amount<=loan.principalMinor-loan.repaidMinor) { "Amount exceeds the outstanding loan or is below repayments." }
+        val direct = !correction && current.lenderId == repo.owner
+        val queued = if (direct) repo.db.loanEventDao().all().filter { it.loanId == loan.id && it.status == "LOCAL_PENDING" && it.type == "REPAYMENT" && it.proposedBy == repo.owner }.sumOf { it.amountMinor ?: 0L } else 0L
+        require(if(correction) amount>=current.repaidMinor else amount<=current.principalMinor-current.repaidMinor-queued) { "Amount exceeds the outstanding loan or is below repayments." }
         val e=LoanEventEntity(UUID.randomUUID().toString(),loan.id,if(correction) "CORRECTION" else "REPAYMENT",amount,repo.owner,null,"LOCAL_PENDING",System.currentTimeMillis(),"PENDING")
-        repo.db.loanEventDao().put(e); repo.queue("LOAN_EVENT",e.id,"PROPOSE",LedgerJson.encodeToString(e))
+        repo.db.loanEventDao().put(e); repo.queue("LOAN_EVENT",e.id,if(direct) "RECORD" else "PROPOSE",LedgerJson.encodeToString(e))
     }
     suspend fun decideEvent(id: String, accept: Boolean) = repo.db.withTransaction {
         val event = requireNotNull(repo.db.loanEventDao().all().find { it.id == id }) { "Proposal no longer available." }
